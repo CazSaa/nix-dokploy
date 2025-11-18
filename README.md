@@ -65,7 +65,7 @@ That's it! Dokploy will be available at `http://your-server-ip:3000`
 | `services.dokploy.image` | `dokploy/dokploy:latest` | Dokploy Docker image |
 | `services.dokploy.port` | `"3000:3000"` | Port binding for web UI (⚠️ see note) |
 | `services.dokploy.traefik.image` | `traefik:v3.5.0` | Traefik Docker image |
-| `services.dokploy.swarm.autoRecreate` | `false` | Auto-recreate swarm when IP changes |
+| `services.dokploy.swarm.autoRecreate` | `false` | Auto-recreate swarm when IP change is detected during service restart |
 
 ### Swarm Advertise Address
 
@@ -89,7 +89,7 @@ services.dokploy.swarm.advertiseAddress = {
   extraPackages = [ pkgs.tailscale ];
 };
 
-# Auto-recreate swarm when IP changes (useful for dynamic IPs)
+# Auto-recreate swarm when IP change is detected during service restart
 services.dokploy.swarm.autoRecreate = true;
 ```
 
