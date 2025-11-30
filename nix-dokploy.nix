@@ -83,21 +83,12 @@ in {
         '';
       };
 
-      environment = lib.mkOption {
-        type = lib.types.attrsOf lib.types.str;
-        default = {};
+      extraArgs = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
         description = ''
-          Environment variables to pass to the Traefik container.
-          Can be used to pass credentials for certificate providers (e.g. CF_DNS_API_TOKEN).
-        '';
-      };
-
-      environmentFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = ''
-          Path to a file containing environment variables to pass to the Traefik container.
-          Can be used to pass credentials for certificate providers (e.g. CF_DNS_API_TOKEN).
+          Extra arguments to pass to the Traefik container's docker run command.
+          Can be used to pass environment variables, volumes, etc.
         '';
       };
     };
@@ -327,8 +318,7 @@ in {
                   -p 80:80/tcp \
                   -p 443:443/tcp \
                   -p 443:443/udp \
-                  ${lib.concatStringsSep " \\\n" (lib.mapAttrsToList (k: v: "--env ${lib.escapeShellArg "${k}=${v}"}") cfg.traefik.environment)} \
-                  ${lib.optionalString (cfg.traefik.environmentFile != null) "--env-file ${cfg.traefik.environmentFile} \\"}
+                  ${lib.concatStringsSep " \\\n" cfg.traefik.extraArgs} \
                   ${cfg.traefik.image}
               fi
             '';
