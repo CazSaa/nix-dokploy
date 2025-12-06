@@ -169,11 +169,15 @@ in {
       }
     ];
 
-    systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0777 root root -"
-      "d ${cfg.dataDir}/traefik 0755 root root -"
-      "d ${cfg.dataDir}/traefik/dynamic 0755 root root -"
-    ];
+    systemd.tmpfiles.rules =
+      [
+        "d ${cfg.dataDir} 0777 root root -"
+        "d ${cfg.dataDir}/traefik 0755 root root -"
+        "d ${cfg.dataDir}/traefik/dynamic 0755 root root -"
+      ]
+      ++ lib.optionals (cfg.dataDir != "/etc/dokploy") [
+        "L /etc/dokploy - - - - ${cfg.dataDir}"
+      ];
 
     systemd.services.dokploy-stack = {
       description = "Dokploy Docker Swarm Stack";
@@ -187,11 +191,14 @@ in {
         ExecStart = let
           script = pkgs.writeShellApplication {
             name = "dokploy-stack-start";
-            excludeShellChecks = [ "SC2034" ];
-            runtimeInputs = [pkgs.curl pkgs.docker pkgs.hostname pkgs.gawk] ++
-              (if cfg.swarm.advertiseAddress ? extraPackages
-               then cfg.swarm.advertiseAddress.extraPackages
-               else []);
+            excludeShellChecks = ["SC2034"];
+            runtimeInputs =
+              [pkgs.curl pkgs.docker pkgs.hostname pkgs.gawk]
+              ++ (
+                if cfg.swarm.advertiseAddress ? extraPackages
+                then cfg.swarm.advertiseAddress.extraPackages
+                else []
+              );
             text = ''
               # Get advertise address based on configuration
               ${
@@ -223,13 +230,17 @@ in {
               current_addr=$(docker info --format '{{.Swarm.NodeAddr}}' 2>/dev/null || echo "")
 
               # Leave swarm if auto-recreate is enabled and address changed
-              ${if cfg.swarm.autoRecreate then ''
-                if [[ "$swarm_active" == "active" ]] && [[ "$current_addr" != "$advertise_addr" ]]; then
-                  echo "Advertise address changed ($current_addr -> $advertise_addr), recreating swarm..."
-                  docker swarm leave --force
-                  swarm_active="inactive"
-                fi
-              '' else ""}
+              ${
+                if cfg.swarm.autoRecreate
+                then ''
+                  if [[ "$swarm_active" == "active" ]] && [[ "$current_addr" != "$advertise_addr" ]]; then
+                    echo "Advertise address changed ($current_addr -> $advertise_addr), recreating swarm..."
+                    docker swarm leave --force
+                    swarm_active="inactive"
+                  fi
+                ''
+                else ""
+              }
 
               # Initialize swarm if inactive
               if [[ "$swarm_active" != "active" ]]; then
