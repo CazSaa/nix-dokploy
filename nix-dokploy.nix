@@ -41,11 +41,9 @@ in {
 
     image = lib.mkOption {
       type = lib.types.str;
-      default = "dokploy/dokploy:latest";
+      default = "dokploy/dokploy:v0.25.11";
       description = ''
         Dokploy Docker image to use.
-        Note: Check Dokploy's installation script for compatible Traefik versions
-        when changing this.
       '';
     };
 
@@ -188,11 +186,15 @@ in {
       }
     ];
 
-    systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0777 root root -"
-      "d ${cfg.dataDir}/traefik 0755 root root -"
-      "d ${cfg.dataDir}/traefik/dynamic 0755 root root -"
-    ];
+    systemd.tmpfiles.rules =
+      [
+        "d ${cfg.dataDir} 0777 root root -"
+        "d ${cfg.dataDir}/traefik 0755 root root -"
+        "d ${cfg.dataDir}/traefik/dynamic 0755 root root -"
+      ]
+      ++ lib.optionals (cfg.dataDir != "/etc/dokploy") [
+        "L /etc/dokploy - - - - ${cfg.dataDir}"
+      ];
 
     systemd.services.dokploy-stack = {
       description = "Dokploy Docker Swarm Stack";
