@@ -47,6 +47,17 @@ in {
       '';
     };
 
+    environment = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = {};
+      description = ''
+        Environment variables to pass to the Dokploy container.
+      '';
+      example = {
+        TZ = "Europe/Amsterdam";
+      };
+    };
+
     lxc = lib.mkOption {
       type = lib.types.bool;
       default = false;
