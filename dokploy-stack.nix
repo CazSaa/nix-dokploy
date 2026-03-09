@@ -32,7 +32,7 @@ in
             }
             // passwordEnv;
           volumes = [
-            "dokploy-postgres-database:/var/lib/postgresql/data"
+            "dokploy-postgres:/var/lib/postgresql/data"
           ];
           networks = {
             dokploy-network = {
@@ -49,7 +49,7 @@ in
       redis = {
         image = "redis:7";
         volumes = [
-          "redis-data-volume:/data"
+          "dokploy-redis:/data"
         ];
         networks = {
           dokploy-network = {
@@ -78,7 +78,7 @@ in
           volumes = [
             "/var/run/docker.sock:/var/run/docker.sock"
             "${cfg.dataDir}:/etc/dokploy"
-            "dokploy-docker-config:/root/.docker"
+            "dokploy:/root/.docker"
           ];
           depends_on = ["postgres" "redis"];
           deploy =
@@ -125,9 +125,9 @@ in
     };
 
     volumes = {
-      dokploy-postgres-database = {};
-      redis-data-volume = {};
-      dokploy-docker-config = {};
+      dokploy-postgres = {};
+      dokploy-redis = {};
+      dokploy = {};
     };
   }
   // lib.optionalAttrs useSecrets {
