@@ -21,7 +21,7 @@ in {
         }
       ];
       volumes = [
-        "dokploy-postgres-database:/var/lib/postgresql/data"
+        "dokploy-postgres:/var/lib/postgresql/data"
       ];
       networks = {
         dokploy-network = {
@@ -53,7 +53,7 @@ in {
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock"
           "${cfg.dataDir}:/etc/dokploy"
-          "dokploy-docker-config:/root/.docker"
+          "dokploy:/root/.docker"
         ];
         depends_on = ["postgres"];
         deploy =
@@ -105,8 +105,8 @@ in {
   };
 
   volumes = {
-    dokploy-postgres-database = {};
-    dokploy-docker-config = {};
+    dokploy-postgres = {};
+    dokploy = {};
   };
 
   secrets = lib.listToAttrs (map (name: {
