@@ -7,32 +7,62 @@
   cfg = config.services.dokploy;
 
   useSecrets = !cfg.database.useInsecureHardcodedPassword;
+  useAuthSecrets = !cfg.auth.useInsecureHardcodedSecret;
 
   stackConfig = import ./dokploy-stack.nix {inherit cfg lib;};
   yamlFormat = pkgs.formats.yaml {};
   stackFile = yamlFormat.generate "dokploy-stack.yml" stackConfig;
 
-  deploySnippet =
-    if useSecrets
+  deploySnippet = let
+    secretChecks = lib.concatStringsSep "\n" (
+      lib.optional useSecrets ''
+        if [ ! -f "${cfg.database.passwordFile}" ]; then
+          echo "Error: password file not found: ${cfg.database.passwordFile}"
+          exit 1
+        fi
+
+        if ! docker secret inspect dokploy_postgres_password >/dev/null 2>&1; then
+          echo "Creating Docker secret from password file..."
+          docker secret create dokploy_postgres_password "${cfg.database.passwordFile}"
+        fi
+      ''
+      ++ lib.optional useAuthSecrets ''
+        if [ ! -f "${cfg.auth.secretFile}" ]; then
+          echo "Error: auth secret file not found: ${cfg.auth.secretFile}"
+          exit 1
+        fi
+
+        if ! docker secret inspect dokploy_auth_secret >/dev/null 2>&1; then
+          echo "Creating Docker auth secret from secret file..."
+          docker secret create dokploy_auth_secret "${cfg.auth.secretFile}"
+        fi
+      ''
+    );
+
+    envLines =
+      lib.optional (!useSecrets) "POSTGRES_PASSWORD=\"amukds4wi9001583845717ad2\""
+      ++ lib.optional (!useAuthSecrets) "BETTER_AUTH_SECRET=\"better-auth-secret-123456789\"";
+
+    allLines = envLines ++ ["ADVERTISE_ADDR=\"$advertise_addr\"" "docker stack deploy -c ${stackFile} --detach=false dokploy"];
+
+    cmd = lib.concatStringsSep " \\\n  " allLines;
+
+    warningMsg = lib.concatStringsSep " " (
+      lib.optional (!useSecrets) "database.useInsecureHardcodedPassword is enabled."
+      ++ lib.optional (!useAuthSecrets) "auth.useInsecureHardcodedSecret is enabled."
+    );
+  in
+    if useSecrets && useAuthSecrets
     then ''
-      if [ ! -f "${cfg.database.passwordFile}" ]; then
-        echo "Error: password file not found: ${cfg.database.passwordFile}"
-        exit 1
-      fi
+      ${secretChecks}
 
-      if ! docker secret inspect dokploy_postgres_password >/dev/null 2>&1; then
-        echo "Creating Docker secret from password file..."
-        docker secret create dokploy_postgres_password "${cfg.database.passwordFile}"
-      fi
-
-      ADVERTISE_ADDR="$advertise_addr" \
-      docker stack deploy -c ${stackFile} --detach=false dokploy
+      ${cmd}
     ''
     else
-      lib.warn "nix-dokploy: database.useInsecureHardcodedPassword is enabled. This uses a well-known password from Dokploy's source code. Migrate to database.passwordFile as soon as possible." ''
-        ADVERTISE_ADDR="$advertise_addr" \
-        POSTGRES_PASSWORD="amukds4wi9001583845717ad2" \
-        docker stack deploy -c ${stackFile} --detach=false dokploy
+      lib.warn "nix-dokploy: ${warningMsg} This uses well-known credentials from Dokploy's source code. Migrate to passwordFile/secretFile as soon as possible." ''
+        ${secretChecks}
+
+        ${cmd}
       '';
 in {
   options.services.dokploy = {
@@ -72,9 +102,33 @@ in {
       };
     };
 
+    auth = {
+      useInsecureHardcodedSecret = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Use the old hardcoded Better Auth secret from Dokploy's source code.
+          This is insecure and only intended as a temporary migration aid for
+          existing installations. Set auth.secretFile instead.
+        '';
+      };
+
+      secretFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Path to a file containing the Better Auth secret for Dokploy.
+          The file must be readable by root and will be used as a Docker secret.
+
+          Required unless auth.useInsecureHardcodedSecret is enabled.
+        '';
+        example = "/var/lib/secrets/dokploy-auth-secret";
+      };
+    };
+
     image = lib.mkOption {
       type = lib.types.str;
-      default = "dokploy/dokploy:v0.28.8";
+      default = "dokploy/dokploy:v0.29.3";
       description = ''
         Dokploy Docker image to use.
       '';
@@ -296,6 +350,25 @@ in {
       {
         assertion = !(cfg.database.passwordFile != null && cfg.database.useInsecureHardcodedPassword);
         message = "Cannot set both database.passwordFile and database.useInsecureHardcodedPassword";
+      }
+      {
+        assertion = cfg.auth.secretFile != null || cfg.auth.useInsecureHardcodedSecret;
+        message = ''
+          Dokploy now uses Docker secrets for the Better Auth secret.
+          You must set one of:
+
+            services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
+
+          Or, to continue using the old hardcoded secret temporarily:
+
+            services.dokploy.auth.useInsecureHardcodedSecret = true;
+
+          See the "Auth Secret" section in the README for migration steps.
+        '';
+      }
+      {
+        assertion = !(cfg.auth.secretFile != null && cfg.auth.useInsecureHardcodedSecret);
+        message = "Cannot set both auth.secretFile and auth.useInsecureHardcodedSecret";
       }
     ];
 

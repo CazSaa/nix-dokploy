@@ -44,6 +44,7 @@ NixOS-only — uses `systemd.services` and `systemd.tmpfiles` directly.
 
           services.dokploy.enable = true;
           services.dokploy.database.passwordFile = "/var/lib/secrets/dokploy-db-password";
+          services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
         }
       ];
     };
@@ -51,11 +52,12 @@ NixOS-only — uses `systemd.services` and `systemd.tmpfiles` directly.
 }
 ```
 
-Generate a password file on the host before deploying:
+Generate secret files on the host before deploying:
 
 ```bash
 mkdir -p /var/lib/secrets
 openssl rand -base64 32 > /var/lib/secrets/dokploy-db-password
+openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
 ```
 
 Dokploy will be available at `http://your-server-ip:3000`
@@ -67,7 +69,7 @@ Dokploy will be available at `http://your-server-ip:3000`
 | Option | Default | Description |
 |--------|---------|-------------|
 | `dataDir` | `/var/lib/dokploy` | Data directory |
-| `image` | `dokploy/dokploy:v0.28.4` | Dokploy Docker image |
+| `image` | `dokploy/dokploy:v0.29.3` | Dokploy Docker image |
 | `environment` | `{}` | Environment variables for the Dokploy container |
 | `lxc` | `false` | LXC compatibility mode (e.g. Proxmox) |
 
@@ -161,6 +163,95 @@ Docker secrets are immutable, so the deploy script won't update an existing secr
    ```
 3. Remove the stack: `docker stack rm dokploy`
 4. Remove the old secret: `docker secret rm dokploy_postgres_password`
+5. Redeploy with `nixos-rebuild switch`
+
+### Auth Secret
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `auth.secretFile` | — (required) | Path to file containing the Better Auth secret |
+| `auth.useInsecureHardcodedSecret` | `false` | Use the old hardcoded secret (migration aid only) |
+
+The secret is stored as a Docker secret. Generate one before deploying:
+
+```bash
+openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
+```
+
+```nix
+services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
+```
+
+#### Upgrading from the old hardcoded secret
+
+Dokploy v0.29.3 added a `migrate-auth-secret` command for existing 2FA records. You must upgrade to v0.29.3 **before** migrating the secret.
+
+**Step 1: Upgrade to v0.29.3 while keeping the old secret**
+
+Pin the v0.29.3 image and add the temporary fallback:
+
+> If your current nix-dokploy input does not yet have the `auth` options, you only need to set the `image` option below to upgrade Dokploy itself.
+
+```nix
+services.dokploy.image = "dokploy/dokploy:v0.29.3";
+services.dokploy.auth.useInsecureHardcodedSecret = true;
+```
+
+Rebuild:
+
+```bash
+sudo nixos-rebuild switch
+```
+
+This deploys the v0.29.3 image with the old secret. Verify the container is running before proceeding.
+
+**Step 2: Generate a new secret**
+
+```bash
+openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
+```
+
+**Step 3: Migrate existing 2FA records**
+
+Run the migration inside the currently running v0.29.3 container:
+
+```bash
+DOKPLOY_CONTAINER=$(docker ps --filter "name=dokploy_dokploy" --format "{{.ID}}" | head -n1)
+NEW_SECRET=$(cat /var/lib/secrets/dokploy-auth-secret)
+docker exec \
+    -e OLD_SECRET=better-auth-secret-123456789 \
+    -e NEW_SECRET="$NEW_SECRET" \
+    "$DOKPLOY_CONTAINER" \
+    sh -c "cd /app && pnpm run migrate-auth-secret"
+```
+
+**Step 4: Switch to the secret file**
+
+Remove `useInsecureHardcodedSecret` and set the secret file:
+
+```nix
+services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
+```
+
+Rebuild:
+
+```bash
+sudo nixos-rebuild switch
+```
+
+All active sessions will be invalidated after this change. Users will need to log in again. 2FA remains functional.
+
+#### Rotating the secret
+
+Docker secrets are immutable, so the deploy script won't update an existing secret. To rotate, run these steps as root:
+
+1. Generate a new secret file:
+   ```bash
+   openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
+   ```
+2. Migrate existing 2FA records in the running Dokploy container (same command as above).
+3. Remove the stack: `docker stack rm dokploy`
+4. Remove the old secret: `docker secret rm dokploy_auth_secret`
 5. Redeploy with `nixos-rebuild switch`
 
 ### Swarm
