@@ -3,20 +3,57 @@
   lib,
 }: let
   useSecrets = !cfg.database.useInsecureHardcodedPassword;
+  useAuthSecrets = !cfg.auth.useInsecureHardcodedSecret;
+
+  enabledSecrets = lib.concatLists [
+    (lib.optional useSecrets "postgres_password")
+    (lib.optional useAuthSecrets "auth_secret")
+  ];
+
+  dockerSecretNames = {
+    postgres_password = "dokploy_postgres_password";
+    auth_secret = "dokploy_auth_secret";
+  };
+
+  mkServiceSecrets = name:
+    lib.optionalAttrs (lib.elem name enabledSecrets) {
+      secrets = [
+        {
+          source = name;
+          target = "/run/secrets/${name}";
+        }
+      ];
+    };
+
+  passwordSecrets = mkServiceSecrets "postgres_password";
+  authSecrets = mkServiceSecrets "auth_secret";
+  dokploySecrets = lib.optionalAttrs (enabledSecrets != []) {
+    secrets =
+      map (name: {
+        source = name;
+        target = "/run/secrets/${name}";
+      })
+      enabledSecrets;
+  };
 
   passwordEnv =
     if useSecrets
     then {POSTGRES_PASSWORD_FILE = "/run/secrets/postgres_password";}
     else {POSTGRES_PASSWORD = "\${POSTGRES_PASSWORD}";};
 
-  passwordSecrets = lib.optionalAttrs useSecrets {
-    secrets = [
-      {
-        source = "postgres_password";
-        target = "/run/secrets/postgres_password";
-      }
-    ];
-  };
+  authEnv =
+    if useAuthSecrets
+    then {BETTER_AUTH_SECRET_FILE = "/run/secrets/auth_secret";}
+    else {BETTER_AUTH_SECRET = "\${BETTER_AUTH_SECRET}";};
+
+  allSecrets = lib.listToAttrs (map (name: {
+      inherit name;
+      value = {
+        external = true;
+        name = dockerSecretNames.${name};
+      };
+    })
+    enabledSecrets);
 in
   {
     version = "3.8";
@@ -69,7 +106,7 @@ in
             {
               ADVERTISE_ADDR = "\${ADVERTISE_ADDR}";
             }
-            // passwordEnv // cfg.environment;
+            // passwordEnv // authEnv // cfg.environment;
           networks = {
             dokploy-network = {
               aliases = ["dokploy-app"];
@@ -95,7 +132,7 @@ in
               endpoint_mode = "dnsrr";
             };
         }
-        // passwordSecrets
+        // dokploySecrets
         // lib.optionalAttrs (cfg.port != null) {
           ports = let
             parts = lib.splitString ":" cfg.port;
@@ -130,11 +167,6 @@ in
       dokploy-docker-config = {};
     };
   }
-  // lib.optionalAttrs useSecrets {
-    secrets = {
-      postgres_password = {
-        external = true;
-        name = "dokploy_postgres_password";
-      };
-    };
+  // lib.optionalAttrs (allSecrets != {}) {
+    secrets = allSecrets;
   }
