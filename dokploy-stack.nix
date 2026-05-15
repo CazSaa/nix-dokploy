@@ -15,18 +15,15 @@
     auth_secret = "dokploy_auth_secret";
   };
 
-  mkServiceSecrets = name:
-    lib.optionalAttrs (lib.elem name enabledSecrets) {
-      secrets = [
-        {
-          source = name;
-          target = "/run/secrets/${name}";
-        }
-      ];
-    };
+  passwordSecrets = lib.optionalAttrs useSecrets {
+    secrets = [
+      {
+        source = "postgres_password";
+        target = "/run/secrets/postgres_password";
+      }
+    ];
+  };
 
-  passwordSecrets = mkServiceSecrets "postgres_password";
-  authSecrets = mkServiceSecrets "auth_secret";
   dokploySecrets = lib.optionalAttrs (enabledSecrets != []) {
     secrets =
       map (name: {
