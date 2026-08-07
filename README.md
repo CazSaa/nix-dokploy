@@ -45,6 +45,7 @@ NixOS-only — uses `systemd.services` and `systemd.tmpfiles` directly.
           services.dokploy.enable = true;
           services.dokploy.database.passwordFile = "/var/lib/secrets/dokploy-db-password";
           services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
+          services.dokploy.encryption.keyFile = "/var/lib/secrets/dokploy-encryption-key";
         }
       ];
     };
@@ -58,6 +59,7 @@ Generate secret files on the host before deploying:
 mkdir -p /var/lib/secrets
 openssl rand -base64 32 > /var/lib/secrets/dokploy-db-password
 openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
+openssl rand -hex 32 > /var/lib/secrets/dokploy-encryption-key
 ```
 
 Dokploy will be available at `http://your-server-ip:3000`
@@ -69,7 +71,7 @@ Dokploy will be available at `http://your-server-ip:3000`
 | Option | Default | Description |
 |--------|---------|-------------|
 | `dataDir` | `/var/lib/dokploy` | Data directory |
-| `image` | `dokploy/dokploy:v0.29.4` | Dokploy Docker image |
+| `image` | `dokploy/dokploy:v0.29.14` | Dokploy Docker image |
 | `environment` | `{}` | Environment variables for the Dokploy container |
 | `lxc` | `false` | LXC compatibility mode (e.g. Proxmox) |
 
@@ -170,7 +172,6 @@ Docker secrets are immutable, so the deploy script won't update an existing secr
 | Option | Default | Description |
 |--------|---------|-------------|
 | `auth.secretFile` | — (required) | Path to file containing the Better Auth secret |
-| `auth.useInsecureHardcodedSecret` | `false` | Use the old hardcoded secret (migration aid only) |
 
 The secret is stored as a Docker secret. Generate one before deploying:
 
@@ -182,77 +183,54 @@ openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
 services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
 ```
 
-#### Upgrading from the old hardcoded secret
-
-Dokploy v0.29.3 added a `migrate-auth-secret` command for existing 2FA records. You must upgrade to v0.29.3 **before** migrating the secret.
-
-**Step 1: Upgrade to v0.29.3 while keeping the old secret**
-
-Pin the v0.29.3 image and add the temporary fallback:
-
-> If your current nix-dokploy input does not yet have the `auth` options, you only need to set the `image` option below to upgrade Dokploy itself.
-
-```nix
-services.dokploy.image = "dokploy/dokploy:v0.29.3";
-services.dokploy.auth.useInsecureHardcodedSecret = true;
-```
-
-Rebuild:
-
-```bash
-sudo nixos-rebuild switch
-```
-
-This deploys the v0.29.3 image with the old secret. Verify the container is running before proceeding.
-
-**Step 2: Generate a new secret**
-
-```bash
-openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
-```
-
-**Step 3: Migrate existing 2FA records**
-
-Run the migration inside the currently running v0.29.3 container:
-
-```bash
-DOKPLOY_CONTAINER=$(docker ps --filter "name=dokploy_dokploy" --format "{{.ID}}" | head -n1)
-NEW_SECRET=$(cat /var/lib/secrets/dokploy-auth-secret)
-docker exec \
-    -e OLD_SECRET=better-auth-secret-123456789 \
-    -e NEW_SECRET="$NEW_SECRET" \
-    "$DOKPLOY_CONTAINER" \
-    sh -c "cd /app && pnpm run migrate-auth-secret"
-```
-
-**Step 4: Switch to the secret file**
-
-Remove `useInsecureHardcodedSecret` and set the secret file:
-
-```nix
-services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
-```
-
-Rebuild:
-
-```bash
-sudo nixos-rebuild switch
-```
-
-All active sessions will be invalidated after this change. Users will need to log in again. 2FA remains functional.
+> Since Dokploy v0.29.12, environment variables are encrypted at rest. Without a dedicated key the encryption key is derived from this secret, making it effectively immutable — which is why this module requires `encryption.keyFile` (see [Encryption Key](#encryption-key)).
 
 #### Rotating the secret
 
+> **Caution on Dokploy v0.29.12+:** any values encrypted under a key derived from this secret (only possible if you ran v0.29.12+ before `encryption.keyFile` was set) become unreadable after rotation. Dokploy re-encrypts such values with the dedicated key only when they are next saved — re-save them all before rotating.
+
 Docker secrets are immutable, so the deploy script won't update an existing secret. To rotate, run these steps as root:
 
-1. Generate a new secret file:
+1. Generate a new secret value:
    ```bash
-   openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
+   NEW_SECRET=$(openssl rand -hex 32)
    ```
-2. Migrate existing 2FA records in the running Dokploy container (same command as above).
-3. Remove the stack: `docker stack rm dokploy`
-4. Remove the old secret: `docker secret rm dokploy_auth_secret`
-5. Redeploy with `nixos-rebuild switch`
+2. Migrate existing 2FA records in the running Dokploy container:
+   ```bash
+   DOKPLOY_CONTAINER=$(docker ps --filter "name=dokploy_dokploy" --format "{{.ID}}" | head -n1)
+   docker exec \
+       -e OLD_SECRET="$(cat /var/lib/secrets/dokploy-auth-secret)" \
+       -e NEW_SECRET="$NEW_SECRET" \
+       "$DOKPLOY_CONTAINER" \
+       sh -c "cd /app && pnpm run migrate-auth-secret"
+   ```
+3. Update the secret file:
+   ```bash
+   echo "$NEW_SECRET" > /var/lib/secrets/dokploy-auth-secret
+   ```
+4. Remove the stack: `docker stack rm dokploy`
+5. Remove the old secret: `docker secret rm dokploy_auth_secret`
+6. Redeploy with `nixos-rebuild switch`
+
+### Encryption Key
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `encryption.keyFile` | — (required) | Path to file containing a dedicated encryption key |
+
+Since Dokploy v0.29.12, environment variables are encrypted at rest (AES-256-GCM). This option provides a dedicated key for that encryption, stored as a Docker secret and passed to Dokploy via `ENCRYPTION_KEY_FILE`. Without it, Dokploy falls back to a key derived from the auth secret, coupling your stored data to a secret you may want to rotate — so this module requires it.
+
+```bash
+openssl rand -hex 32 > /var/lib/secrets/dokploy-encryption-key
+```
+
+```nix
+services.dokploy.encryption.keyFile = "/var/lib/secrets/dokploy-encryption-key";
+```
+
+> **Never rotate this key.** Encrypted values cannot be re-keyed in bulk; a changed key makes them unreadable. Adding the key to an existing install is safe: values encrypted before the change (only possible if you previously overrode `image` to v0.29.12+) remain readable via the auth-secret-derived key and are re-encrypted with the dedicated key as each one is saved.
+>
+> Do **not** pass the key via `services.dokploy.environment` — those values end up world-readable in the Nix store.
 
 ### Swarm
 

@@ -3,16 +3,16 @@
   lib,
 }: let
   useSecrets = !cfg.database.useInsecureHardcodedPassword;
-  useAuthSecrets = !cfg.auth.useInsecureHardcodedSecret;
 
   enabledSecrets = lib.concatLists [
     (lib.optional useSecrets "postgres_password")
-    (lib.optional useAuthSecrets "auth_secret")
+    ["auth_secret" "encryption_key"]
   ];
 
   dockerSecretNames = {
     postgres_password = "dokploy_postgres_password";
     auth_secret = "dokploy_auth_secret";
+    encryption_key = "dokploy_encryption_key";
   };
 
   passwordSecrets = lib.optionalAttrs useSecrets {
@@ -38,10 +38,9 @@
     then {POSTGRES_PASSWORD_FILE = "/run/secrets/postgres_password";}
     else {POSTGRES_PASSWORD = "\${POSTGRES_PASSWORD}";};
 
-  authEnv =
-    if useAuthSecrets
-    then {BETTER_AUTH_SECRET_FILE = "/run/secrets/auth_secret";}
-    else {BETTER_AUTH_SECRET = "\${BETTER_AUTH_SECRET}";};
+  authEnv = {BETTER_AUTH_SECRET_FILE = "/run/secrets/auth_secret";};
+
+  encryptionEnv = {ENCRYPTION_KEY_FILE = "/run/secrets/encryption_key";};
 
   allSecrets = lib.listToAttrs (map (name: {
       inherit name;
@@ -80,22 +79,6 @@ in
         }
         // passwordSecrets;
 
-      redis = {
-        image = "redis:7";
-        volumes = [
-          "redis-data-volume:/data"
-        ];
-        networks = {
-          dokploy-network = {
-            aliases = ["dokploy-redis"];
-          };
-        };
-        deploy = {
-          placement.constraints = ["node.role == manager"];
-          restart_policy.condition = "any";
-        };
-      };
-
       dokploy =
         {
           inherit (cfg) image;
@@ -103,7 +86,7 @@ in
             {
               ADVERTISE_ADDR = "\${ADVERTISE_ADDR}";
             }
-            // passwordEnv // authEnv // cfg.environment;
+            // passwordEnv // authEnv // encryptionEnv // cfg.environment;
           networks = {
             dokploy-network = {
               aliases = ["dokploy-app"];
@@ -114,7 +97,7 @@ in
             "${cfg.dataDir}:/etc/dokploy"
             "dokploy-docker-config:/root/.docker"
           ];
-          depends_on = ["postgres" "redis"];
+          depends_on = ["postgres"];
           deploy =
             {
               replicas = 1;
@@ -160,7 +143,6 @@ in
 
     volumes = {
       dokploy-postgres-database = {};
-      redis-data-volume = {};
       dokploy-docker-config = {};
     };
   }

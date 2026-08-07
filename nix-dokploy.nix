@@ -7,7 +7,6 @@
   cfg = config.services.dokploy;
 
   useSecrets = !cfg.database.useInsecureHardcodedPassword;
-  useAuthSecrets = !cfg.auth.useInsecureHardcodedSecret;
 
   stackConfig = import ./dokploy-stack.nix {inherit cfg lib;};
   yamlFormat = pkgs.formats.yaml {};
@@ -26,45 +25,75 @@
           docker secret create dokploy_postgres_password "${cfg.database.passwordFile}"
         fi
       ''
-      ++ lib.optional useAuthSecrets ''
-        if [ ! -f "${cfg.auth.secretFile}" ]; then
-          echo "Error: auth secret file not found: ${cfg.auth.secretFile}"
-          exit 1
-        fi
+      ++ [
+        ''
+          if [ ! -f "${cfg.auth.secretFile}" ]; then
+            echo "Error: auth secret file not found: ${cfg.auth.secretFile}"
+            exit 1
+          fi
 
-        if ! docker secret inspect dokploy_auth_secret >/dev/null 2>&1; then
-          echo "Creating Docker auth secret from secret file..."
-          docker secret create dokploy_auth_secret "${cfg.auth.secretFile}"
-        fi
-      ''
+          if ! docker secret inspect dokploy_auth_secret >/dev/null 2>&1; then
+            echo "Creating Docker auth secret from secret file..."
+            docker secret create dokploy_auth_secret "${cfg.auth.secretFile}"
+          fi
+        ''
+      ]
+      ++ [
+        ''
+          if [ ! -f "${cfg.encryption.keyFile}" ]; then
+            echo "Error: encryption key file not found: ${cfg.encryption.keyFile}"
+            exit 1
+          fi
+
+          if ! docker secret inspect dokploy_encryption_key >/dev/null 2>&1; then
+            echo "Creating Docker encryption key secret from key file..."
+            docker secret create dokploy_encryption_key "${cfg.encryption.keyFile}"
+          fi
+        ''
+      ]
     );
 
     envLines =
-      lib.optional (!useSecrets) "POSTGRES_PASSWORD=\"amukds4wi9001583845717ad2\""
-      ++ lib.optional (!useAuthSecrets) "BETTER_AUTH_SECRET=\"better-auth-secret-123456789\"";
+      lib.optional (!useSecrets) "POSTGRES_PASSWORD=\"amukds4wi9001583845717ad2\"";
 
     allLines = envLines ++ ["ADVERTISE_ADDR=\"$advertise_addr\"" "docker stack deploy -c ${stackFile} --detach=false dokploy"];
 
     cmd = lib.concatStringsSep " \\\n  " allLines;
-
-    warningMsg = lib.concatStringsSep " " (
-      lib.optional (!useSecrets) "database.useInsecureHardcodedPassword is enabled."
-      ++ lib.optional (!useAuthSecrets) "auth.useInsecureHardcodedSecret is enabled."
-    );
   in
-    if useSecrets && useAuthSecrets
+    if useSecrets
     then ''
       ${secretChecks}
 
       ${cmd}
     ''
     else
-      lib.warn "nix-dokploy: ${warningMsg} This uses well-known credentials from Dokploy's source code. Migrate to passwordFile/secretFile as soon as possible." ''
+      lib.warn "nix-dokploy: database.useInsecureHardcodedPassword is enabled. This uses well-known credentials from Dokploy's source code. Migrate to passwordFile as soon as possible." ''
         ${secretChecks}
 
         ${cmd}
       '';
 in {
+  imports = [
+    (lib.mkRemovedOptionModule ["services" "dokploy" "auth" "useInsecureHardcodedSecret"] ''
+      Dokploy v0.29.12+ encrypts environment variables at rest with a key derived
+      from BETTER_AUTH_SECRET, so running with the well-known hardcoded secret is
+      no longer supported: it would encrypt your data with a publicly known key,
+      and rotating the secret afterwards would leave the already-encrypted values
+      unreadable until each one is re-saved by hand.
+
+      If you are still on the hardcoded secret, migrate now:
+
+        1. Pin nix-dokploy to the last revision that supported this option:
+
+             nix-dokploy.url = "github:el-kurto/nix-dokploy/9b04a58467be7b0f633492602c9eb02321c380b1";
+
+        2. Follow "Upgrading from the old hardcoded secret" in that revision's
+           README (run migrate-auth-secret, then set auth.secretFile).
+
+        3. Remove the input pin and this option, and rebuild.
+    '')
+  ];
+
   options.services.dokploy = {
     enable = lib.mkOption {
       type = lib.types.bool;
@@ -103,16 +132,6 @@ in {
     };
 
     auth = {
-      useInsecureHardcodedSecret = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = ''
-          Use the old hardcoded Better Auth secret from Dokploy's source code.
-          This is insecure and only intended as a temporary migration aid for
-          existing installations. Set auth.secretFile instead.
-        '';
-      };
-
       secretFile = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -120,15 +139,39 @@ in {
           Path to a file containing the Better Auth secret for Dokploy.
           The file must be readable by root and will be used as a Docker secret.
 
-          Required unless auth.useInsecureHardcodedSecret is enabled.
+          Since Dokploy v0.29.12, this secret also derives the key used to
+          encrypt environment variables at rest unless encryption.keyFile is
+          set — do not rotate it without setting encryption.keyFile first.
         '';
         example = "/var/lib/secrets/dokploy-auth-secret";
       };
     };
 
+    encryption = {
+      keyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Path to a file containing a dedicated key for Dokploy's
+          encryption of environment variables at rest (Dokploy v0.29.12+).
+          The file must be readable by root and will be used as a Docker
+          secret, passed to Dokploy via ENCRYPTION_KEY_FILE.
+
+          Required. Without it, Dokploy derives the encryption key from
+          the Better Auth secret, which makes auth.secretFile impossible
+          to rotate safely.
+
+          Note: values encrypted before this key was set remain encrypted
+          under the auth-secret-derived key; Dokploy re-encrypts each value
+          with this key the next time it is saved.
+        '';
+        example = "/var/lib/secrets/dokploy-encryption-key";
+      };
+    };
+
     image = lib.mkOption {
       type = lib.types.str;
-      default = "dokploy/dokploy:v0.29.5";
+      default = "dokploy/dokploy:v0.29.14";
       description = ''
         Dokploy Docker image to use.
       '';
@@ -350,23 +393,67 @@ in {
         message = "Cannot set both database.passwordFile and database.useInsecureHardcodedPassword";
       }
       {
-        assertion = cfg.auth.secretFile != null || cfg.auth.useInsecureHardcodedSecret;
+        assertion = cfg.auth.secretFile != null;
         message = ''
-          Dokploy now uses Docker secrets for the Better Auth secret.
-          You must set one of:
+          Dokploy uses a Docker secret for the Better Auth secret. You must set:
 
             services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
 
-          Or, to continue using the old hardcoded secret temporarily:
-
-            services.dokploy.auth.useInsecureHardcodedSecret = true;
-
-          See the "Auth Secret" section in the README for migration steps.
+          See the "Auth Secret" section in the README.
         '';
       }
       {
-        assertion = !(cfg.auth.secretFile != null && cfg.auth.useInsecureHardcodedSecret);
-        message = "Cannot set both auth.secretFile and auth.useInsecureHardcodedSecret";
+        assertion = cfg.encryption.keyFile != null;
+        message = ''
+          Dokploy v0.29.12+ encrypts environment variables at rest. Without a
+          dedicated key it derives one from the Better Auth secret, making
+          auth.secretFile impossible to rotate safely, so this module requires:
+
+            services.dokploy.encryption.keyFile = "/var/lib/secrets/dokploy-encryption-key";
+
+          Generate it once and never rotate it:
+
+            openssl rand -hex 32 > /var/lib/secrets/dokploy-encryption-key
+
+          Safe for existing installs: values encrypted before the key was set
+          (only possible if you overrode image to v0.29.12+ earlier) remain
+          readable and are re-encrypted with this key as each one is saved.
+
+          See the "Encryption Key" section in the README.
+        '';
+      }
+      {
+        assertion = let
+          tag = builtins.match ".*:v([0-9.]+)" cfg.image;
+        in
+          tag == null || lib.versionAtLeast (builtins.head tag) "0.29.9";
+        message = ''
+          image is set to ${cfg.image}, but Dokploy versions before v0.29.9
+          require the redis service for their deployment queue, which this
+          module no longer deploys (upstream dropped redis in v0.29.9).
+
+          To run an older Dokploy, pin nix-dokploy to the last revision that
+          deployed redis:
+
+            nix-dokploy.url = "github:el-kurto/nix-dokploy/9b04a58467be7b0f633492602c9eb02321c380b1";
+        '';
+      }
+      {
+        assertion = !(cfg.environment ? ENCRYPTION_KEY || cfg.environment ? ENCRYPTION_KEY_FILE);
+        message = ''
+          Do not set ENCRYPTION_KEY or ENCRYPTION_KEY_FILE via
+          services.dokploy.environment: those values end up world-readable in
+          the Nix store, and Dokploy prefers ENCRYPTION_KEY over the
+          module-managed ENCRYPTION_KEY_FILE, silently ignoring
+          encryption.keyFile.
+
+          Move the key value into a root-readable file and set:
+
+            services.dokploy.encryption.keyFile = "/var/lib/secrets/dokploy-encryption-key";
+
+          The file must contain your existing key, byte for byte — data
+          already encrypted under it becomes unreadable with any other value.
+        '';
       }
     ];
 
