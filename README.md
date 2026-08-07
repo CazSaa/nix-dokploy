@@ -146,7 +146,7 @@ echo "$NEW_SECRET" > /var/lib/secrets/dokploy-auth-secret
 
 > If you ever ran Dokploy v0.29.12+ before `encryption.keyFile` was set, values encrypted back then are still keyed to the old auth secret until re-saved — re-save them all before rotating.
 
-**Encryption key** — never rotate it. Encrypted values cannot be re-keyed in bulk; a changed key makes them unreadable. Keep an offsite copy: database backups are only restorable with it.
+**Encryption key** — never rotate it. Encrypted values cannot be re-keyed in bulk; a changed key makes them unreadable. Keep an offsite copy: database backups contain the encrypted values, so restoring one without the original key means re-entering every stored environment variable by hand.
 
 ### Swarm
 
