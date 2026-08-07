@@ -6,72 +6,34 @@
 }: let
   cfg = config.services.dokploy;
 
-  useSecrets = !cfg.database.useInsecureHardcodedPassword;
-
   stackConfig = import ./dokploy-stack.nix {inherit cfg lib;};
   yamlFormat = pkgs.formats.yaml {};
   stackFile = yamlFormat.generate "dokploy-stack.yml" stackConfig;
 
   deploySnippet = let
-    secretChecks = lib.concatStringsSep "\n" (
-      lib.optional useSecrets ''
-        if [ ! -f "${cfg.database.passwordFile}" ]; then
-          echo "Error: password file not found: ${cfg.database.passwordFile}"
-          exit 1
-        fi
+    secretCheck = secretName: file: ''
+      if [ ! -f "${file}" ]; then
+        echo "Error: secret file not found: ${file}"
+        exit 1
+      fi
 
-        if ! docker secret inspect dokploy_postgres_password >/dev/null 2>&1; then
-          echo "Creating Docker secret from password file..."
-          docker secret create dokploy_postgres_password "${cfg.database.passwordFile}"
-        fi
-      ''
-      ++ [
-        ''
-          if [ ! -f "${cfg.auth.secretFile}" ]; then
-            echo "Error: auth secret file not found: ${cfg.auth.secretFile}"
-            exit 1
-          fi
+      if ! docker secret inspect ${secretName} >/dev/null 2>&1; then
+        echo "Creating Docker secret ${secretName} from ${file}..."
+        docker secret create ${secretName} "${file}"
+      fi
+    '';
 
-          if ! docker secret inspect dokploy_auth_secret >/dev/null 2>&1; then
-            echo "Creating Docker auth secret from secret file..."
-            docker secret create dokploy_auth_secret "${cfg.auth.secretFile}"
-          fi
-        ''
-      ]
-      ++ [
-        ''
-          if [ ! -f "${cfg.encryption.keyFile}" ]; then
-            echo "Error: encryption key file not found: ${cfg.encryption.keyFile}"
-            exit 1
-          fi
+    secretChecks = lib.concatStringsSep "\n" [
+      (secretCheck "dokploy_postgres_password" cfg.database.passwordFile)
+      (secretCheck "dokploy_auth_secret" cfg.auth.secretFile)
+      (secretCheck "dokploy_encryption_key" cfg.encryption.keyFile)
+    ];
+  in ''
+    ${secretChecks}
 
-          if ! docker secret inspect dokploy_encryption_key >/dev/null 2>&1; then
-            echo "Creating Docker encryption key secret from key file..."
-            docker secret create dokploy_encryption_key "${cfg.encryption.keyFile}"
-          fi
-        ''
-      ]
-    );
-
-    envLines =
-      lib.optional (!useSecrets) "POSTGRES_PASSWORD=\"amukds4wi9001583845717ad2\"";
-
-    allLines = envLines ++ ["ADVERTISE_ADDR=\"$advertise_addr\"" "docker stack deploy -c ${stackFile} --detach=false dokploy"];
-
-    cmd = lib.concatStringsSep " \\\n  " allLines;
-  in
-    if useSecrets
-    then ''
-      ${secretChecks}
-
-      ${cmd}
-    ''
-    else
-      lib.warn "nix-dokploy: database.useInsecureHardcodedPassword is enabled. This uses well-known credentials from Dokploy's source code. Migrate to passwordFile as soon as possible." ''
-        ${secretChecks}
-
-        ${cmd}
-      '';
+    ADVERTISE_ADDR="$advertise_addr" \
+      docker stack deploy -c ${stackFile} --detach=false dokploy
+  '';
 in {
   imports = [
     (lib.mkRemovedOptionModule ["services" "dokploy" "auth" "useInsecureHardcodedSecret"] ''
@@ -92,6 +54,32 @@ in {
 
         3. Remove the input pin and this option, and rebuild.
     '')
+    (lib.mkRemovedOptionModule ["services" "dokploy" "database" "useInsecureHardcodedPassword"] ''
+      Running with the well-known hardcoded PostgreSQL password from Dokploy's
+      source code is no longer supported. Migrate to a real password — this
+      works against your running install without pinning anything:
+
+        1. Generate a password file:
+
+             openssl rand -base64 32 > /var/lib/secrets/dokploy-db-password
+
+        2. Change the password in the running PostgreSQL container. As root,
+           open a psql shell:
+
+             docker exec -it $(docker ps --filter "name=dokploy_postgres" -q) psql -U dokploy -d dokploy
+
+           and set the password to the contents of the file:
+
+             ALTER USER dokploy WITH PASSWORD 'contents-of-password-file';
+
+        3. Remove this option, set database.passwordFile to the file path,
+           and rebuild.
+
+      To defer migration, pin nix-dokploy to the last revision that supported
+      this option:
+
+        nix-dokploy.url = "github:el-kurto/nix-dokploy/273cec63b0de314845bc8dc7fdeabe9685cfc742";
+    '')
   ];
 
   options.services.dokploy = {
@@ -108,24 +96,12 @@ in {
     };
 
     database = {
-      useInsecureHardcodedPassword = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = ''
-          Use the old hardcoded PostgreSQL password from Dokploy's source code.
-          This is insecure and only intended as a temporary migration aid for
-          existing installations. Set database.passwordFile instead.
-        '';
-      };
-
       passwordFile = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = ''
           Path to a file containing the PostgreSQL password for Dokploy.
           The file must be readable by root and will be used as a Docker secret.
-
-          Required unless database.useInsecureHardcodedPassword is enabled.
         '';
         example = "/var/lib/secrets/dokploy-db-password";
       };
@@ -374,23 +350,14 @@ in {
         message = "Dokploy stack does not support rootless Docker";
       }
       {
-        assertion = cfg.database.passwordFile != null || cfg.database.useInsecureHardcodedPassword;
+        assertion = cfg.database.passwordFile != null;
         message = ''
-          Dokploy now uses Docker secrets for the PostgreSQL password.
-          You must set one of:
+          Dokploy uses a Docker secret for the PostgreSQL password. You must set:
 
             services.dokploy.database.passwordFile = "/var/lib/secrets/dokploy-db-password";
 
-          Or, to continue using the old hardcoded password temporarily:
-
-            services.dokploy.database.useInsecureHardcodedPassword = true;
-
-          See the "Database Password" section in the README for migration steps.
+          See the "Database Password" section in the README.
         '';
-      }
-      {
-        assertion = !(cfg.database.passwordFile != null && cfg.database.useInsecureHardcodedPassword);
-        message = "Cannot set both database.passwordFile and database.useInsecureHardcodedPassword";
       }
       {
         assertion = cfg.auth.secretFile != null;

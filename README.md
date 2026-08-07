@@ -101,7 +101,6 @@ services.dokploy.port = null;
 | Option | Default | Description |
 |--------|---------|-------------|
 | `database.passwordFile` | — (required) | Path to file containing the PostgreSQL password |
-| `database.useInsecureHardcodedPassword` | `false` | Use the old hardcoded password (migration aid only) |
 
 The password is stored as a Docker secret. Generate one before deploying:
 
@@ -112,41 +111,6 @@ openssl rand -base64 32 > /var/lib/secrets/dokploy-db-password
 ```nix
 services.dokploy.database.passwordFile = "/var/lib/secrets/dokploy-db-password";
 ```
-
-#### Upgrading from the old hardcoded password
-
-Previous versions used a hardcoded password. On upgrade, `nixos-rebuild` will fail asking you to set `database.passwordFile` or enable `database.useInsecureHardcodedPassword`.
-
-**Option A: Keep the old password temporarily**
-
-```nix
-services.dokploy.database.useInsecureHardcodedPassword = true;
-```
-
-A build warning will remind you to migrate.
-
-**Option B: Migrate to a secure password**
-
-Complete these steps in order. The old stack must still be running for step 2.
-
-1. Generate a new password file:
-   ```bash
-   openssl rand -base64 32 > /var/lib/secrets/dokploy-db-password
-   ```
-
-2. Change the password in the running PostgreSQL container. As root, open a psql shell:
-   ```bash
-   docker exec -it $(docker ps --filter "name=dokploy_postgres" -q) psql -U dokploy -d dokploy
-   ```
-   Then set the password to match the contents of your password file:
-   ```sql
-   ALTER USER dokploy WITH PASSWORD 'contents-of-password-file';
-   ```
-
-   > Do not pass the password via command-line flags or environment variables — it
-   > will be visible in the process list.
-
-3. Deploy with `database.passwordFile` set.
 
 #### Rotating the password
 
