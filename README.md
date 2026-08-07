@@ -96,105 +96,57 @@ Once Traefik is set up as a reverse proxy, disable direct access:
 services.dokploy.port = null;
 ```
 
-### Database Password
+### Secrets
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `database.passwordFile` | — (required) | Path to file containing the PostgreSQL password |
+| `auth.secretFile` | — (required) | Path to file containing the Better Auth secret |
+| `encryption.keyFile` | — (required) | Path to file containing the encryption-at-rest key |
 
-The password is stored as a Docker secret. Generate one before deploying:
+Each option points to a root-readable file on the host (generated in [Quick Start](#quick-start)). On deploy, each file becomes a Docker secret, passed to the containers via `*_FILE` environment variables. Never pass secrets via `services.dokploy.environment` — those values end up world-readable in the Nix store.
+
+Since Dokploy v0.29.12, environment variables are encrypted at rest (AES-256-GCM) using the key from `encryption.keyFile`. Without a dedicated key, Dokploy would derive one from the auth secret, making it impossible to rotate safely — which is why this module requires all three.
+
+#### Rotating secrets
+
+Docker secrets are immutable — the deploy script creates each secret once and never updates it. Rotation always ends the same way, run as root:
+
+```bash
+docker stack rm dokploy
+docker secret rm dokploy_postgres_password   # or dokploy_auth_secret
+sudo nixos-rebuild switch
+```
+
+What happens before that depends on the secret:
+
+**Database password** — change it in the running PostgreSQL container first:
 
 ```bash
 openssl rand -base64 32 > /var/lib/secrets/dokploy-db-password
+docker exec -it $(docker ps --filter "name=dokploy_postgres" -q) psql -U dokploy -d dokploy
 ```
 
-```nix
-services.dokploy.database.passwordFile = "/var/lib/secrets/dokploy-db-password";
+```sql
+ALTER USER dokploy WITH PASSWORD 'contents-of-password-file';
 ```
 
-#### Rotating the password
-
-Docker secrets are immutable, so the deploy script won't update an existing secret. To rotate, run these steps as root:
-
-1. Generate a new password file:
-   ```bash
-   openssl rand -base64 32 > /var/lib/secrets/dokploy-db-password
-   ```
-2. Change the password in the running PostgreSQL container:
-   ```bash
-   docker exec -it $(docker ps --filter "name=dokploy_postgres" -q) psql -U dokploy -d dokploy
-   ```
-   ```sql
-   ALTER USER dokploy WITH PASSWORD 'contents-of-password-file';
-   ```
-3. Remove the stack: `docker stack rm dokploy`
-4. Remove the old secret: `docker secret rm dokploy_postgres_password`
-5. Redeploy with `nixos-rebuild switch`
-
-### Auth Secret
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `auth.secretFile` | — (required) | Path to file containing the Better Auth secret |
-
-The secret is stored as a Docker secret. Generate one before deploying:
+**Auth secret** — migrate 2FA records in the running Dokploy container first:
 
 ```bash
-openssl rand -hex 32 > /var/lib/secrets/dokploy-auth-secret
+NEW_SECRET=$(openssl rand -hex 32)
+DOKPLOY_CONTAINER=$(docker ps --filter "name=dokploy_dokploy" --format "{{.ID}}" | head -n1)
+docker exec \
+    -e OLD_SECRET="$(cat /var/lib/secrets/dokploy-auth-secret)" \
+    -e NEW_SECRET="$NEW_SECRET" \
+    "$DOKPLOY_CONTAINER" \
+    sh -c "cd /app && pnpm run migrate-auth-secret"
+echo "$NEW_SECRET" > /var/lib/secrets/dokploy-auth-secret
 ```
 
-```nix
-services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
-```
+> If you ever ran Dokploy v0.29.12+ before `encryption.keyFile` was set, values encrypted back then are still keyed to the old auth secret until re-saved — re-save them all before rotating.
 
-> Since Dokploy v0.29.12, environment variables are encrypted at rest. Without a dedicated key the encryption key is derived from this secret, making it effectively immutable — which is why this module requires `encryption.keyFile` (see [Encryption Key](#encryption-key)).
-
-#### Rotating the secret
-
-> **Caution on Dokploy v0.29.12+:** any values encrypted under a key derived from this secret (only possible if you ran v0.29.12+ before `encryption.keyFile` was set) become unreadable after rotation. Dokploy re-encrypts such values with the dedicated key only when they are next saved — re-save them all before rotating.
-
-Docker secrets are immutable, so the deploy script won't update an existing secret. To rotate, run these steps as root:
-
-1. Generate a new secret value:
-   ```bash
-   NEW_SECRET=$(openssl rand -hex 32)
-   ```
-2. Migrate existing 2FA records in the running Dokploy container:
-   ```bash
-   DOKPLOY_CONTAINER=$(docker ps --filter "name=dokploy_dokploy" --format "{{.ID}}" | head -n1)
-   docker exec \
-       -e OLD_SECRET="$(cat /var/lib/secrets/dokploy-auth-secret)" \
-       -e NEW_SECRET="$NEW_SECRET" \
-       "$DOKPLOY_CONTAINER" \
-       sh -c "cd /app && pnpm run migrate-auth-secret"
-   ```
-3. Update the secret file:
-   ```bash
-   echo "$NEW_SECRET" > /var/lib/secrets/dokploy-auth-secret
-   ```
-4. Remove the stack: `docker stack rm dokploy`
-5. Remove the old secret: `docker secret rm dokploy_auth_secret`
-6. Redeploy with `nixos-rebuild switch`
-
-### Encryption Key
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `encryption.keyFile` | — (required) | Path to file containing a dedicated encryption key |
-
-Since Dokploy v0.29.12, environment variables are encrypted at rest (AES-256-GCM). This option provides a dedicated key for that encryption, stored as a Docker secret and passed to Dokploy via `ENCRYPTION_KEY_FILE`. Without it, Dokploy falls back to a key derived from the auth secret, coupling your stored data to a secret you may want to rotate — so this module requires it.
-
-```bash
-openssl rand -hex 32 > /var/lib/secrets/dokploy-encryption-key
-```
-
-```nix
-services.dokploy.encryption.keyFile = "/var/lib/secrets/dokploy-encryption-key";
-```
-
-> **Never rotate this key.** Encrypted values cannot be re-keyed in bulk; a changed key makes them unreadable. Adding the key to an existing install is safe: values encrypted before the change (only possible if you previously overrode `image` to v0.29.12+) remain readable via the auth-secret-derived key and are re-encrypted with the dedicated key as each one is saved.
->
-> Do **not** pass the key via `services.dokploy.environment` — those values end up world-readable in the Nix store.
+**Encryption key** — never rotate it. Encrypted values cannot be re-keyed in bulk; a changed key makes them unreadable. Keep an offsite copy: database backups are only restorable with it.
 
 ### Swarm
 

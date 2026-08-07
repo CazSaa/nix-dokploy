@@ -356,7 +356,7 @@ in {
 
             services.dokploy.database.passwordFile = "/var/lib/secrets/dokploy-db-password";
 
-          See the "Database Password" section in the README.
+          See the "Secrets" section in the README.
         '';
       }
       {
@@ -366,7 +366,7 @@ in {
 
             services.dokploy.auth.secretFile = "/var/lib/secrets/dokploy-auth-secret";
 
-          See the "Auth Secret" section in the README.
+          See the "Secrets" section in the README.
         '';
       }
       {
@@ -386,7 +386,7 @@ in {
           (only possible if you overrode image to v0.29.12+ earlier) remain
           readable and are re-encrypted with this key as each one is saved.
 
-          See the "Encryption Key" section in the README.
+          See the "Secrets" section in the README.
         '';
       }
       {
